@@ -120,11 +120,9 @@ endif
 
 include $(THEOS_MAKE_PATH)/aggregate.mk
 
-export THEOS_PACKAGE_SCHEME
-export THEOS_STAGING_DIR
-before-package::
-	@devkit/before-package.sh
-
-export THEOS_STAGING_DIR
-after-package::
-	@devkit/after-package.sh
+# 移除对 devkit/before-package.sh 和 devkit/after-package.sh 的调用
+# before-package::
+#	@devkit/before-package.sh
+#
+# after-package::
+#	@devkit/after-package.sh
