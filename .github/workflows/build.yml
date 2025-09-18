@@ -1,146 +1,157 @@
-name: Build TrollVNC
+name: Pilipala Release
 
+# action事件触发
 on:
   push:
-    branches: [ release ]
-  workflow_dispatch:
+    # push tag时触发
+    tags:
+      - "v*.*.*"
 
-env:
-  FINALPACKAGE: 1
-  HOMEBREW_NO_AUTO_UPDATE: 1
-  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
-
+# 可以有多个jobs
 jobs:
-  build:
-    runs-on: macos-14
-    
-    strategy:
-      matrix:
-        scheme: ['default', 'rootless', 'roothide', 'bootstrap']
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
-    - name: Install dependencies
-      run: |
-        brew install xcbeautify ldid-procursus p7zip make
-        # 安装 libarchive 以备可能的依赖需求[7](@ref)
-        brew install libarchive
-        # 确保安装了 Xcode 命令行工具
-        xcode-select --install || true
-        
-    - name: Checkout roothide/theos
-      uses: actions/checkout@v4
-      with:
-        repository: roothide/theos
-        path: theos-roothide
-        submodules: recursive
-        # 建议指定一个稳定的标签或提交哈希，以避免上游更改导致构建失败
-        ref: master # 或替换为具体的 tag，例如 v2.6
-        
-    - name: Install iOS SDKs
-      run: |
-        export THEOS=$GITHUB_WORKSPACE/theos-roothide
-        cd theos-roothide
-        ./bin/install-sdk iPhoneOS16.5
-        ./bin/install-sdk iPhoneOS14.5
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 通常使用默认的 GITHUB_TOKEN 而非 PAT，除非有特殊权限需求[2](@ref)
-        
-    - name: Setup Xcode
-      uses: maxim-lobanov/setup-xcode@v1
-      with:
-        xcode-version: '16.2'
-        
-    - name: Cache Theos SDKs # 添加缓存以加速后续构建[2](@ref)
-      uses: actions/cache@v3
-      with:
-        path: ${{ github.workspace }}/theos-roothide/sdks
-        key: ${{ runner.os }}-theos-sdks-${{ hashFiles('.github/workflows/build.yml') }}
-        restore-keys: |
-          ${{ runner.os }}-theos-sdks-
+  android:
+    # 运行环境 ubuntu-latest window-latest mac-latest
+    runs-on: ubuntu-latest
 
-    - name: Build package (${{ matrix.scheme }})
-      run: |
-        source devkit/${{ matrix.scheme }}.sh
-        # 设置环境变量，确保编译器能找到 SDK 的头文件和框架[7](@ref)
-        export LDFLAGS="-L$(brew --prefix)/opt/libarchive/lib -F$THEOS/sdks/iPhoneOS16.5.sdk/System/Library/Frameworks"
-        export CPPFLAGS="-I$(brew --prefix)/opt/libarchive/include -I$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
-        # 尝试使用 VERBOSE 模式获取更详细的编译信息，便于调试
-        FINALPACKAGE=1 gmake clean package VERBOSE=1
-      env:
-        THEOS: ${{ github.workspace }}/theos-roothide # 明确传递 THEOS 环境变量
-        
-    - name: Prepare artifacts
-      run: |
-        mkdir -p artifacts/dsym-${{ matrix.scheme }}
-        mkdir -p artifacts/packages-${{ matrix.scheme }}
-        
-        if [ -d ".theos/obj" ]; then
-          find .theos/obj -name "*.dSYM" -exec cp -r {} artifacts/dsym-${{ matrix.scheme }}/ \;
-        fi
-        
-        if [ -d "packages" ]; then
-          if [ "${{ matrix.scheme }}" == "bootstrap" ]; then
-            cp -r packages/*.tipa artifacts/packages-${{ matrix.scheme }}/
-          else
-            cp -r packages/*.deb artifacts/packages-${{ matrix.scheme }}/
-          fi
-        fi
-        
-    - name: Upload dSYM artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: dsym-${{ matrix.scheme }}
-        path: artifacts/dsym-${{ matrix.scheme }}
-        if-no-files-found: warn
-        
-    - name: Upload package artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: packages-${{ matrix.scheme }}
-        path: artifacts/packages-${{ matrix.scheme }}
-        if-no-files-found: warn
-
-  release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/release'
-    needs: build
-    runs-on: macos-14
-    
+    # 每个jobs中可以有多个steps
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Download all package artifacts
-      uses: actions/download-artifact@v4
-      with:
-        pattern: packages-*
-        path: release-packages
-        merge-multiple: true
-        
-    - name: Create release tag
-      id: tag
-      run: |
-        PACKAGE_VERSION=$(grep 'PACKAGE_VERSION' Makefile | cut -d' ' -f4)
-        TAG_NAME="v$PACKAGE_VERSION"
-        echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
-        
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ steps.tag.outputs.tag_name }}
-        name: Release ${{ steps.tag.outputs.tag_name }}
-        body: |
-          Automated build from release branch
-          
-          This release contains packages built with:
-          - Default scheme
-          - Rootless scheme
-          - RootHide scheme
-          - Bootstrap (TrollStore)
-          
-          Built on: ${{ github.sha }}
-        files: release-packages/**/*
-        draft: false
-        prerelease: false
+      - name: 代码迁出
+        uses: actions/checkout@v3
+
+      - name: 构建Java环境
+        uses: actions/setup-java@v3
+        with:
+          distribution: "zulu"
+          java-version: "17"
+          token: ${{secrets.GIT_TOKEN}}
+
+      - name: 检查缓存
+        uses: actions/cache@v2
+        id: cache-flutter
+        with:
+          path: /root/flutter-sdk # Flutter SDK 的路径
+          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.lock') }}
+
+      - name: 安装Flutter
+        if: steps.cache-flutter.outputs.cache-hit != 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.19.6
+          channel: any
+
+      - name: 下载项目依赖
+        run: flutter pub get
+
+      - name: 解码生成 jks
+        run: echo $KEYSTORE_BASE64 | base64 -di > android/app/vvex.jks
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+
+      - name: flutter build apk
+        run: flutter build apk --release --split-per-abi
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD}}
+
+      - name: flutter build apk
+        run: flutter build apk --release
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD}}
+
+      - name: 获取版本号
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >>$GITHUB_OUTPUT
+
+      # - name: 获取当前日期
+      #   id: date
+      #   run: echo "date=$(date +'%m%d')" >>$GITHUB_OUTPUT
+
+      - name: 重命名应用
+        run: |
+          # DATE=${{ steps.date.outputs.date }}
+          for file in build/app/outputs/flutter-apk/app-*.apk; do
+            if [[ $file =~ app-(.?*)release.apk ]]; then
+              new_file_name="build/app/outputs/flutter-apk/Pili-${BASH_REMATCH[1]}${{ steps.version.outputs.version }}.apk"
+              mv "$file" "$new_file_name"
+            fi
+          done
+
+      - name: 上传
+        uses: actions/upload-artifact@v3
+        with:
+          name: Pilipala-Release
+          path: |
+            build/app/outputs/flutter-apk/Pili-*.apk
+
+  iOS:
+    runs-on: macos-latest
+
+    steps:
+      - name: 代码迁出
+        uses: actions/checkout@v4
+
+      - name: 安装Flutter
+        if: steps.cache-flutter.outputs.cache-hit != 'true'
+        uses: subosito/flutter-action@v2.10.0
+        with:
+          cache: true
+          flutter-version: 3.19.6
+
+      - name: flutter build ipa
+        run: |
+          flutter build ios --release --no-codesign 
+          ln -sf ./build/ios/iphoneos Payload
+          zip -r9 app.ipa Payload/runner.app
+
+      - name: 获取版本号
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >>$GITHUB_OUTPUT
+
+      - name: 重命名应用
+        run: |
+          DATE=${{ steps.date.outputs.date }}
+          for file in app.ipa; do
+            new_file_name="build/Pili-${{ steps.version.outputs.version }}.ipa"
+            mv "$file" "$new_file_name"
+          done
+
+      - name: 上传
+        uses: actions/upload-artifact@v3
+        with:
+          if-no-files-found: error
+          name: Pilipala-Release
+          path: |
+            build/Pili-*.ipa
+
+  upload:
+    runs-on: ubuntu-latest
+
+    needs:
+      - android
+      - iOS
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: Pilipala-Release
+          path: ./Pilipala-Release
+
+      - name: Install dependencies
+        run: sudo apt-get install tree -y
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >>$GITHUB_OUTPUT
+
+      - name: Upload Release
+        uses: ncipollo/release-action@v1
+        with:
+          name: v${{ steps.version.outputs.version }}
+          token: ${{ secrets.GIT_TOKEN }}
+          omitBodyDuringUpdate: true
+          omitNameDuringUpdate: true
+          omitPrereleaseDuringUpdate: true
+          allowUpdates: true
+          artifacts: Pilipala-Release/*
