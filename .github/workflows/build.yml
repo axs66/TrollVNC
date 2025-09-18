@@ -24,10 +24,11 @@ jobs:
     
     - name: Install dependencies
       run: |
-        # Install xcbeautify for build output formatting
-        # Install ldid for iOS code signing
-        # Install 7zip for compression
         brew install xcbeautify ldid-procursus p7zip make
+        # 安装 libarchive 以备可能的依赖需求[7](@ref)
+        brew install libarchive
+        # 确保安装了 Xcode 命令行工具
+        xcode-select --install || true
         
     - name: Checkout roothide/theos
       uses: actions/checkout@v4
@@ -35,6 +36,8 @@ jobs:
         repository: roothide/theos
         path: theos-roothide
         submodules: recursive
+        # 建议指定一个稳定的标签或提交哈希，以避免上游更改导致构建失败
+        ref: master # 或替换为具体的 tag，例如 v2.6
         
     - name: Install iOS SDKs
       run: |
@@ -43,30 +46,41 @@ jobs:
         ./bin/install-sdk iPhoneOS16.5
         ./bin/install-sdk iPhoneOS14.5
       env:
-        GITHUB_TOKEN: ${{ secrets.PAT }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 通常使用默认的 GITHUB_TOKEN 而非 PAT，除非有特殊权限需求[2](@ref)
         
     - name: Setup Xcode
       uses: maxim-lobanov/setup-xcode@v1
       with:
         xcode-version: '16.2'
         
+    - name: Cache Theos SDKs # 添加缓存以加速后续构建[2](@ref)
+      uses: actions/cache@v3
+      with:
+        path: ${{ github.workspace }}/theos-roothide/sdks
+        key: ${{ runner.os }}-theos-sdks-${{ hashFiles('.github/workflows/build.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-theos-sdks-
+
     - name: Build package (${{ matrix.scheme }})
       run: |
         source devkit/${{ matrix.scheme }}.sh
-        FINALPACKAGE=1 gmake clean package
+        # 设置环境变量，确保编译器能找到 SDK 的头文件和框架[7](@ref)
+        export LDFLAGS="-L$(brew --prefix)/opt/libarchive/lib -F$THEOS/sdks/iPhoneOS16.5.sdk/System/Library/Frameworks"
+        export CPPFLAGS="-I$(brew --prefix)/opt/libarchive/include -I$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
+        # 尝试使用 VERBOSE 模式获取更详细的编译信息，便于调试
+        FINALPACKAGE=1 gmake clean package VERBOSE=1
+      env:
+        THEOS: ${{ github.workspace }}/theos-roothide # 明确传递 THEOS 环境变量
         
     - name: Prepare artifacts
       run: |
-        # Create directories for artifacts
         mkdir -p artifacts/dsym-${{ matrix.scheme }}
         mkdir -p artifacts/packages-${{ matrix.scheme }}
         
-        # Copy dSYM files
         if [ -d ".theos/obj" ]; then
           find .theos/obj -name "*.dSYM" -exec cp -r {} artifacts/dsym-${{ matrix.scheme }}/ \;
         fi
         
-        # Copy packages
         if [ -d "packages" ]; then
           if [ "${{ matrix.scheme }}" == "bootstrap" ]; then
             cp -r packages/*.tipa artifacts/packages-${{ matrix.scheme }}/
@@ -108,7 +122,6 @@ jobs:
     - name: Create release tag
       id: tag
       run: |
-        # Read PACKAGE_VERSION from Makefile
         PACKAGE_VERSION=$(grep 'PACKAGE_VERSION' Makefile | cut -d' ' -f4)
         TAG_NAME="v$PACKAGE_VERSION"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
